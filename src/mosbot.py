@@ -4,6 +4,7 @@ import os
 import discord
 from discord import app_commands
 import sqlite3
+import re
 
 guild_id = os.environ.get('MOSBOT_GUILD_ID')
 MY_GUILD = discord.Object(id=guild_id)  # replace with your guild id
@@ -206,6 +207,98 @@ async def mostake(interaction: discord.Interaction, member: discord.Member, doll
 
     else:
         await interaction.response.send_message(f'{caller_name} does not have $mos ledger write permissions.')
+
+@client.tree.command()
+@app_commands.describe(
+    members='The users to give $mos to (mention them with @)',
+    dollars='The numbers of $mos to give to each user',
+    memo='A memo for the transaction'
+)
+async def mosbulkgive(interaction: discord.Interaction, members: str, dollars: int, memo: str):
+    valid_role = False
+    caller = interaction.user
+    caller_name = str(caller.display_name)
+
+    if dollars < 0:
+        dollars = dollars * -1
+
+    # Check if caller has the "mos" role
+    for role in caller.roles:
+        if role.name == "mos":
+            valid_role = True
+
+    if not valid_role:
+        await interaction.response.send_message(f'{caller_name} does not have $mos ledger write permissions.')
+        return
+
+    # Parse mentioned users from the members string
+    mentioned_users = []
+    member_ids = []
+    
+    # Extract user IDs from mentions (format: <@!123456789> or <@123456789>)
+    user_mentions = re.findall(r'<@!?(\d+)>', members)
+    
+    if not user_mentions:
+        await interaction.response.send_message('No valid user mentions found. Please mention users with @username.')
+        return
+
+    # Get member objects from IDs
+    guild = interaction.guild
+    for user_id in user_mentions:
+        try:
+            member = guild.get_member(int(user_id))
+            if member:
+                mentioned_users.append(member)
+                member_ids.append(int(user_id))
+        except:
+            continue
+
+    if not mentioned_users:
+        await interaction.response.send_message('No valid users found from the mentions.')
+        return
+
+    # Process each user
+    con = sqlite3.connect("mosbot.db")
+    cur = con.cursor()
+    
+    results = []
+    successful_transactions = 0
+    
+    for member in mentioned_users:
+        member_name = str(member.display_name)
+        member_id = member.id
+        
+        try:
+            res = cur.execute("SELECT * FROM bank WHERE id=?", (member_id,))
+            
+            if res.fetchone() is not None:
+                res = cur.execute("SELECT * FROM bank WHERE id=?", (member_id,))
+                data = res.fetchone()
+                
+                update_dollars = data[1] + dollars
+                
+                cur.execute("UPDATE bank SET balance=? WHERE id=?", (update_dollars, member_id,))
+                results.append(f'✅ {member_name}: {dollars} $mos (now has {update_dollars} $mos)')
+                successful_transactions += 1
+            else:
+                cur.execute("INSERT INTO bank VALUES(?,?)", (member_id, dollars,))
+                results.append(f'✅ {member_name}: {dollars} $mos (new account)')
+                successful_transactions += 1
+                
+        except Exception as e:
+            results.append(f'❌ {member_name}: Failed to process transaction')
+    
+    con.commit()
+    con.close()
+    
+    # Create response message
+    response_msg = f'**Bulk $mos Distribution Complete**\n'
+    response_msg += f'Successfully processed {successful_transactions}/{len(mentioned_users)} transactions\n'
+    response_msg += f'Amount per user: {dollars} $mos\n'
+    response_msg += f'Memo: {memo}\n\n'
+    response_msg += '**Results:**\n' + '\n'.join(results)
+    
+    await interaction.response.send_message(response_msg)
 
 @client.tree.command()
 @app_commands.describe(
